@@ -12,7 +12,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== НАСТРОЙКИ ==========
-BOT_TOKEN = "8118873655:AAEM3HJIyLxjFnuuD2dIrNBqO3v0j6Sv1bg"
+BOT_TOKEN = "8442227835:AAEm4UYtkDX8TrTpilX5iDJhxnMegkVdmzM"
 ADMIN_ID = 5479063264
 ANONYMOUS_PRICE = 5  # Доплата за анонимность
 
