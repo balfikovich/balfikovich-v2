@@ -1,571 +1,1082 @@
 import asyncio
 import aiohttp
 import logging
+import json
 import time
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
+# ========== НАСТРОЙКИ ==========
 BOT_TOKEN = "8442227835:AAEm4UYtkDX8TrTpilX5iDJhxnMegkVdmzM"
 ADMIN_ID = 5479063264
-ANONYMOUS_PRICE = 5
 
+# Список подарков
 GIFTS = {
-    "gift_1": {"name": "🎄 Елка новогодняя", "emoji": "🎄", "price": 60, "gift_id": "5922558454332916696"},
-    "gift_2": {"name": "🧸 Новогодний мишка", "emoji": "🧸", "price": 65, "gift_id": "5956217000635139069"},
-    "gift_3": {"name": "💝 Февральское сердце", "emoji": "💝", "price": 65, "gift_id": "5801108895304779062"},
-    "gift_4": {"name": "🧸 Февральский мишка", "emoji": "🧸", "price": 50, "gift_id": "5800655655995968830"}
+    "gift_1": {
+        "name": "🎄 Елка новогодняя",
+        "emoji": "🎄",
+        "price": 60,
+        "gift_id": "5922558454332916696"
+    },
+    "gift_2": {
+        "name": "🧸 Новогодний мишка",
+        "emoji": "🧸",
+        "price": 65,
+        "gift_id": "5956217000635139069"
+    },
+    "gift_3": {
+        "name": "💝 Февральское сердце",
+        "emoji": "💝",
+        "price": 65,
+        "gift_id": "5801108895304779062"
+    },
+    "gift_4": {
+        "name": "🧸 Февральский мишка",
+        "emoji": "🧸",
+        "price": 65,
+        "gift_id": "5800655655995968830"
+    }
 }
+# ==================================
 
-class Bot:
-    def __init__(self):
-        self.url = f"https://api.telegram.org/bot{BOT_TOKEN}"
-        self.users = {}
-        self.states = {}
-        self.orders = {}
-        self.pending = {}
-        self.blocked = set()
-        self.payments = set()
-        self.temps = {}
-    
-    async def api(self, method, **kw):
-        async with aiohttp.ClientSession() as s:
-            async with s.post(f"{self.url}/{method}", json=kw) as r:
-                return await r.json()
-    
-    def calc_price(self, gk, anon):
-        """ПРАВИЛЬНЫЙ расчет цены"""
-        return GIFTS[gk]["price"] + (ANONYMOUS_PRICE if anon else 0)
-    
-    async def run(self):
-        logger.info("🚀 Запуск")
-        me = await self.api("getMe")
-        print(f"\n✅ @{me['result']['username']}\n👑 Админ: {ADMIN_ID}\n🎭 Анонимность: +{ANONYMOUS_PRICE}⭐️\n")
+class GiftSender:
+    def __init__(self, bot_token: str, gifts: dict, admin_id: int):
+        self.bot_token = bot_token
+        self.gifts = gifts
+        self.admin_id = admin_id
+        self.base_url = f"https://api.telegram.org/bot{bot_token}"
         
-        o = 0
-        while True:
-            try:
-                r = await self.api("getUpdates", timeout=30, offset=o)
-                for u in r.get("result", []):
-                    o = u["update_id"] + 1
-                    await self.h(u)
-                await asyncio.sleep(0.1)
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                logger.error(f"Ошибка: {e}")
-                await asyncio.sleep(2)
+        # Хранилища данных
+        self.processed_payments = set()
+        self.blocked_users = set()
+        self.all_users = {}
+        self.pending_gifts = {}
+        self.user_states = {}
+        self.order_messages = {}
+        self.temp_messages = {}
     
-    async def h(self, u):
-        try:
-            # MESSAGE
-            if "message" in u:
-                m = u["message"]
-                c = m["chat"]["id"]
-                t = m.get("text", "")
-                user = m["from"]
-                un = user.get("username", "")
-                
-                # Регистрация
-                if c not in self.users:
-                    self.users[c] = {"un": f"@{un}" if un else "нет", "name": user.get("first_name", "Юзер"), "t": time.time()}
-                    logger.info(f"Новый: {c} @{un}")
+    def is_blocked(self, username: str) -> bool:
+        """Проверка заблокирован ли пользователь"""
+        if not username:
+            return False
+        username_clean = username.lstrip("@").lower()
+        return username_clean in self.blocked_users
+    
+    def register_user(self, user_data: dict):
+        """Регистрация пользователя"""
+        user_id = user_data.get("id")
+        username = user_data.get("username", "")
+        first_name = user_data.get("first_name", "Пользователь")
+        
+        if user_id:
+            self.all_users[user_id] = {
+                "username": f"@{username}" if username else "нет username",
+                "first_name": first_name,
+                "last_seen": time.time()
+            }
+            logger.info(f"👤 Зарегистрирован: {user_id} (@{username})")
+    
+    def validate_username(self, username: str) -> tuple:
+        """Базовая валидация username"""
+        username = username.strip().lstrip("@")
+        
+        if not username:
+            return False, "❌ Username не может быть пустым!"
+        
+        if len(username) < 5:
+            return False, "❌ Username слишком короткий! Минимум 5 символов."
+        
+        if not username.replace("_", "").isalnum():
+            return False, "❌ Username может содержать только буквы, цифры и подчеркивание!"
+        
+        return True, username
+    
+    def check_username_in_database(self, username: str) -> tuple:
+        """Проверка username в нашей базе пользователей"""
+        username_clean = username.lstrip("@").lower()
+        
+        for user_id, user_data in self.all_users.items():
+            user_username = user_data.get("username", "").lstrip("@").lower()
+            if user_username == username_clean:
+                first_name = user_data.get("first_name", "Пользователь")
+                logger.info(f"✅ Username @{username} найден в базе (ID: {user_id})")
+                return True, user_id, first_name
+        
+        logger.info(f"⚠️ Username @{username} не найден в базе")
+        return False, None, None
+    
+    def get_order_summary(self, chat_id: int) -> str:
+        """Формирование сводки заказа"""
+        if chat_id not in self.user_states:
+            return ""
+        
+        state = self.user_states[chat_id]
+        gift_key = state.get("gift_key")
+        
+        if not gift_key or gift_key not in self.gifts:
+            return ""
+        
+        gift = self.gifts[gift_key]
+        recipient = state.get("recipient", "")
+        recipient_username = state.get("recipient_username", "")
+        message_text = state.get("message", "")
+        
+        summary = f"✨ <b>Ты выбрал: {gift['name']}</b>\n"
+        summary += f"💰 Цена: <b>{gift['price']} звезд ⭐️</b>\n\n"
+        summary += "📋 <b>Детали заказа:</b>\n"
+        
+        # Получатель
+        if recipient == "self":
+            summary += "👤 Для кого: <b>Для себя</b>\n"
+        elif recipient == "other":
+            if recipient_username:
+                summary += f"👤 Для кого: <b>Для @{recipient_username}</b>\n"
+            else:
+                summary += "👤 Для кого: <b>Для другого человека</b> ⏳\n"
+        else:
+            summary += "👤 Для кого: <i>не выбрано</i>\n"
+        
+        # Подпись
+        if "has_message" in state:
+            if state["has_message"] == "with":
+                if message_text:
+                    summary += f"💌 Подпись: <b>Да</b>\n   <i>\"{message_text}\"</i>\n"
                 else:
-                    self.users[c]["t"] = time.time()
+                    summary += "💌 Подпись: <b>Да</b> ⏳ <i>(ожидается ввод)</i>\n"
+            else:
+                summary += "💌 Подпись: <b>Нет</b>\n"
+        else:
+            summary += "💌 Подпись: <i>не выбрано</i>\n"
+        
+        return summary
+    
+    async def send_gift(self, user_id: int, gift_id: str, text: str = None):
+        """Отправка подарка пользователю"""
+        try:
+            logger.info(f"🎁 Отправка подарка {gift_id} пользователю {user_id}")
+            
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/sendGift"
+                payload = {
+                    "user_id": user_id,
+                    "gift_id": gift_id
+                }
                 
-                # Блок
-                if un.lower() in self.blocked:
-                    await self.api("sendMessage", chat_id=c, text="🚫 Заблокирован")
+                if text:
+                    payload["text"] = text
+                
+                async with session.post(url, json=payload) as response:
+                    result = await response.json()
+                    
+                    logger.info(f"Ответ API sendGift: {json.dumps(result, indent=2, ensure_ascii=False)}")
+                    
+                    if result.get("ok"):
+                        logger.info(f"✅ Подарок успешно отправлен!")
+                        return True
+                    else:
+                        error_description = result.get("description", "Неизвестная ошибка")
+                        logger.error(f"❌ Ошибка API sendGift: {error_description}")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка при отправке подарка: {e}")
+            return False
+    
+    async def update_order_message(self, chat_id: int, step: str):
+        """Обновление сообщения с заказом"""
+        try:
+            summary = self.get_order_summary(chat_id)
+            
+            if not summary:
+                return False
+            
+            state = self.user_states[chat_id]
+            
+            keyboard = {"inline_keyboard": []}
+            
+            if step == "recipient":
+                summary += "\n👇 <b>Для кого этот подарок?</b>"
+                keyboard["inline_keyboard"] = [
+                    [{"text": "🎁 Для себя", "callback_data": f"recipient_self_{state['gift_key']}"}],
+                    [{"text": "💝 Для другого человека", "callback_data": f"recipient_other_{state['gift_key']}"}],
+                    [{"text": "❌ Отменить заказ", "callback_data": "cancel_order"}]
+                ]
+            
+            elif step == "waiting_username":
+                summary += "\n⏳ <b>Жду ввод username получателя...</b>\n"
+                summary += "<i>Получатель должен хотя бы раз писать боту /start</i>"
+                keyboard["inline_keyboard"] = [
+                    [{"text": "❌ Отменить заказ", "callback_data": "cancel_order"}]
+                ]
+            
+            elif step == "username_not_found":
+                recipient_username = state.get("pending_recipient_username", "")
+                summary += f"\n\n⚠️ <b>Пользователь @{recipient_username} еще не писал боту</b>\n\n"
+                summary += "Подарок будет отправлен когда он напишет /start.\n\n"
+                summary += "👇 <b>Что делать?</b>"
+                keyboard["inline_keyboard"] = [
+                    [{"text": "✅ Да, продолжить", "callback_data": "confirm_unknown"}],
+                    [{"text": "🔄 Ввести другой username", "callback_data": "reenter_username"}],
+                    [{"text": "❌ Отменить заказ", "callback_data": "cancel_order"}]
+                ]
+            
+            elif step == "message_choice":
+                summary += "\n👇 <b>Добавить подпись к подарку?</b>"
+                keyboard["inline_keyboard"] = [
+                    [{"text": "📝 С подписью", "callback_data": "msg_with"}],
+                    [{"text": "🎁 Без подписи", "callback_data": "msg_without"}],
+                    [{"text": "❌ Отменить заказ", "callback_data": "cancel_order"}]
+                ]
+            
+            elif step == "waiting_message":
+                summary += "\n⏳ <b>Жду текст подписи...</b>"
+                keyboard["inline_keyboard"] = [
+                    [{"text": "❌ Отменить заказ", "callback_data": "cancel_order"}]
+                ]
+            
+            elif step == "ready":
+                summary += "\n\n✅ <b>Всё готово к оплате!</b>"
+                keyboard["inline_keyboard"] = [
+                    [{"text": "💳 Перейти к оплате", "callback_data": "proceed_payment"}],
+                    [{"text": "❌ Отменить заказ", "callback_data": "cancel_order"}]
+                ]
+            
+            elif step == "payment_sent":
+                summary += "\n\n💳 <b>Счет отправлен!</b>\n\n"
+                summary += "⏰ Оплатите в течение 15 минут\n"
+                summary += "Для отмены напишите /cancel"
+                keyboard["inline_keyboard"] = []
+            
+            message_id = self.order_messages.get(chat_id)
+            
+            if message_id:
+                async with aiohttp.ClientSession() as session:
+                    url = f"{self.base_url}/editMessageText"
+                    payload = {
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "text": summary,
+                        "parse_mode": "HTML",
+                        "reply_markup": keyboard
+                    }
+                    
+                    async with session.post(url, json=payload) as response:
+                        result = await response.json()
+                        return result.get("ok", False)
+            else:
+                async with aiohttp.ClientSession() as session:
+                    url = f"{self.base_url}/sendMessage"
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": summary,
+                        "parse_mode": "HTML",
+                        "reply_markup": keyboard
+                    }
+                    
+                    async with session.post(url, json=payload) as response:
+                        result = await response.json()
+                        
+                        if result.get("ok"):
+                            self.order_messages[chat_id] = result["result"]["message_id"]
+                        
+                        return result.get("ok", False)
+                    
+        except Exception as e:
+            logger.error(f"Ошибка обновления сообщения: {e}")
+            return False
+    
+    async def cancel_order(self, chat_id: int):
+        """Отмена заказа"""
+        try:
+            if chat_id in self.user_states:
+                del self.user_states[chat_id]
+            
+            if chat_id in self.order_messages:
+                message_id = self.order_messages[chat_id]
+                await self.delete_message(chat_id, message_id)
+                del self.order_messages[chat_id]
+            
+            if chat_id in self.temp_messages:
+                for msg_id in self.temp_messages[chat_id]:
+                    await self.delete_message(chat_id, msg_id)
+                del self.temp_messages[chat_id]
+            
+            await self.send_message(
+                chat_id,
+                "❌ <b>Заказ отменен</b>\n\nХочешь выбрать другой подарок? Напиши /start",
+                parse_mode="HTML"
+            )
+            
+            logger.info(f"❌ Заказ отменен для {chat_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка отмены заказа: {e}")
+            return False
+    
+    async def send_gift_menu(self, chat_id: int):
+        """Отправка меню с подарками"""
+        try:
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": f"{self.gifts['gift_1']['emoji']} Елка новогодняя - {self.gifts['gift_1']['price']}⭐️", 
+                      "callback_data": "gift_1"}],
+                    [{"text": f"{self.gifts['gift_2']['emoji']} Новогодний мишка - {self.gifts['gift_2']['price']}⭐️", 
+                      "callback_data": "gift_2"}],
+                    [{"text": f"{self.gifts['gift_3']['emoji']} Февральское сердце - {self.gifts['gift_3']['price']}⭐️", 
+                      "callback_data": "gift_3"}],
+                    [{"text": f"{self.gifts['gift_4']['emoji']} Февральский мишка - {self.gifts['gift_4']['price']}⭐️", 
+                      "callback_data": "gift_4"}]
+                ]
+            }
+            
+            if chat_id == self.admin_id:
+                keyboard["inline_keyboard"].append([{"text": "👑 Админ панель", "callback_data": "admin_panel"}])
+            
+            message_text = (
+                "🎁 <b>Добро пожаловать в магазин подарков!</b>\n\n"
+                "Выбери подарок который хочешь купить:\n\n"
+                f"🎄 <b>Елка новогодняя</b> - {self.gifts['gift_1']['price']}⭐️\n"
+                f"🧸 <b>Новогодний мишка</b> - {self.gifts['gift_2']['price']}⭐️\n"
+                f"💝 <b>Февральское сердце</b> - {self.gifts['gift_3']['price']}⭐️\n"
+                f"🧸 <b>Февральский мишка</b> - {self.gifts['gift_4']['price']}⭐️\n\n"
+                "Нажми на кнопку чтобы купить! 👇"
+            )
+            
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": message_text,
+                    "parse_mode": "HTML",
+                    "reply_markup": keyboard
+                }
+                
+                async with session.post(url, json=payload) as response:
+                    result = await response.json()
+                    return result.get("ok", False)
+                    
+        except Exception as e:
+            logger.error(f"Ошибка отправки меню: {e}")
+            return False
+    
+    async def send_admin_panel(self, chat_id: int):
+        """Отправка админ панели"""
+        try:
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "🚫 Заблокировать пользователя", "callback_data": "admin_block"}],
+                    [{"text": "✅ Разблокировать пользователя", "callback_data": "admin_unblock"}],
+                    [{"text": "👥 Последние пользователи", "callback_data": "admin_users"}],
+                    [{"text": "📢 Рассылка", "callback_data": "admin_broadcast"}],
+                    [{"text": "🔙 Назад в магазин", "callback_data": "back_to_shop"}]
+                ]
+            }
+            
+            blocked_count = len(self.blocked_users)
+            users_count = len(self.all_users)
+            
+            message_text = (
+                "👑 <b>АДМИН ПАНЕЛЬ</b>\n\n"
+                f"📊 Всего пользователей: <b>{users_count}</b>\n"
+                f"🚫 Заблокировано: <b>{blocked_count}</b>\n\n"
+                "Выбери действие:"
+            )
+            
+            await self.send_message(chat_id, message_text, parse_mode="HTML", reply_markup=keyboard)
+            return True
+                    
+        except Exception as e:
+            logger.error(f"Ошибка отправки админ панели: {e}")
+            return False
+    
+    async def send_invoice(self, chat_id: int):
+        """Отправка инвойса для оплаты"""
+        try:
+            if chat_id not in self.user_states:
+                return False
+            
+            state = self.user_states[chat_id]
+            gift_key = state.get("gift_key")
+            recipient = state.get("recipient_username", "self")
+            message_text = state.get("message")
+            
+            gift = self.gifts[gift_key]
+            
+            logger.info(f"💳 Отправка инвойса на {gift['price']}⭐️")
+            
+            unique_payload = f"{gift_key}_{chat_id}_{recipient}_{int(time.time()*1000)}"
+            state["payload"] = unique_payload
+            state["invoice_sent_at"] = time.time()
+            
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/sendInvoice"
+                payload = {
+                    "chat_id": chat_id,
+                    "title": f"{gift['emoji']} {gift['name']}",
+                    "description": f"Оплатите {gift['price']}⭐️ для отправки подарка! Для отмены /cancel",
+                    "payload": unique_payload,
+                    "currency": "XTR",
+                    "prices": [
+                        {
+                            "label": gift['name'],
+                            "amount": gift['price']
+                        }
+                    ]
+                }
+                
+                async with session.post(url, json=payload) as response:
+                    result = await response.json()
+                    
+                    if result.get("ok"):
+                        logger.info(f"✅ Инвойс отправлен")
+                        await self.update_order_message(chat_id, "payment_sent")
+                        return True
+                    else:
+                        error_description = result.get("description", "")
+                        logger.error(f"❌ Ошибка инвойса: {error_description}")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка при отправке инвойса: {e}")
+            return False
+    
+    async def send_message(self, chat_id: int, text: str, parse_mode: str = None, reply_markup: dict = None):
+        """Отправка сообщения"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": text
+                }
+                
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                
+                if reply_markup:
+                    payload["reply_markup"] = reply_markup
+                
+                async with session.post(url, json=payload) as response:
+                    result = await response.json()
+                    
+                    if result.get("ok"):
+                        return result["result"]["message_id"]
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Ошибка отправки сообщения: {e}")
+            return None
+    
+    async def answer_callback_query(self, callback_query_id: str, text: str = "", show_alert: bool = False):
+        """Ответ на callback query"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/answerCallbackQuery"
+                payload = {
+                    "callback_query_id": callback_query_id,
+                    "text": text,
+                    "show_alert": show_alert
+                }
+                
+                async with session.post(url, json=payload) as response:
+                    result = await response.json()
+                    return result.get("ok", False)
+                    
+        except Exception as e:
+            logger.error(f"Ошибка ответа на callback: {e}")
+            return False
+    
+    async def delete_message(self, chat_id: int, message_id: int):
+        """Удаление сообщения"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/deleteMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "message_id": message_id
+                }
+                
+                async with session.post(url, json=payload) as response:
+                    result = await response.json()
+                    return result.get("ok", False)
+                    
+        except Exception as e:
+            logger.error(f"Ошибка удаления сообщения: {e}")
+            return False
+    
+    async def get_updates(self, offset=0):
+        """Получение обновлений от Telegram"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/getUpdates"
+                params = {"timeout": 30}
+                
+                if offset > 0:
+                    params["offset"] = offset
+                
+                async with session.get(url, params=params) as response:
+                    result = await response.json()
+                    if result.get("ok"):
+                        return result.get("result", [])
+                    return []
+                    
+        except Exception as e:
+            logger.error(f"Ошибка получения обновлений: {e}")
+            return []
+    
+    async def process_update(self, update):
+        """Обработка обновления"""
+        try:
+            # Обработка текстовых сообщений
+            if "message" in update:
+                message = update["message"]
+                chat_id = message["chat"]["id"]
+                text = message.get("text", "")
+                message_id = message.get("message_id")
+                user = message.get("from", {})
+                username = user.get("username", "")
+                
+                self.register_user(user)
+                
+                if self.is_blocked(username):
+                    await self.send_message(chat_id, "🚫 Вы заблокированы.")
                     return
                 
                 # /start
-                if t == "/start":
-                    # Проверка активного заказа
-                    if c in self.states and self.states[c].get("inv"):
-                        await self.api("sendMessage", chat_id=c, text="⚠️ Активный заказ! /cancel")
+                if text == "/start":
+                    if chat_id in self.user_states and self.user_states[chat_id].get("invoice_sent_at"):
+                        await self.send_message(chat_id, "⚠️ У тебя активный заказ! /cancel для отмены")
                         return
                     
-                    # Доставка ожидающих подарков
-                    for k in list(self.pending.keys()):
-                        p = self.pending[k]
-                        if p["un"].lower() == un.lower():
-                            g = GIFTS[p["gk"]]
-                            ok = await self.api("sendGift", user_id=c, gift_id=g["gift_id"], text=p.get("msg"), pay_for_upgrade=p.get("anon", False))
-                            if ok.get("ok"):
-                                txt = f"🎉 {g['emoji']} <b>{g['name']}</b>"
-                                if p.get("anon"):
-                                    txt += " 🎭 анонимно!"
-                                else:
-                                    s = self.users.get(p["sid"], {})
-                                    txt += f" от <b>{s.get('name', 'Кто-то')}</b>!"
-                                if p.get("msg"):
-                                    txt += f"\n\n💌 {p['msg']}"
-                                await self.api("sendMessage", chat_id=c, text=txt, parse_mode="HTML")
-                                await self.api("sendMessage", chat_id=p["sid"], text=f"✅ Доставлено @{un}!")
-                            del self.pending[k]
+                    # Проверка ожидающих подарков
+                    pending = [k for k, v in self.pending_gifts.items() 
+                              if v.get("recipient_username", "").lower() == username.lower()]
                     
-                    # Меню
-                    kb = {"inline_keyboard": [[{"text": f"{g['emoji']} {g['name']} - {g['price']}⭐️", "callback_data": k}] for k, g in GIFTS.items()]}
-                    if c == ADMIN_ID:
-                        kb["inline_keyboard"].append([{"text": "👑 Админ", "callback_data": "adm"}])
-                    await self.api("sendMessage", chat_id=c, text="🎁 <b>Магазин подарков</b>\n\nВыбери:", parse_mode="HTML", reply_markup=kb)
+                    if pending:
+                        for payload_key in pending:
+                            gift_data = self.pending_gifts[payload_key]
+                            gift_key = gift_data["gift_key"]
+                            sender_id = gift_data["sender_id"]
+                            message_text = gift_data.get("message")
+                            
+                            gift = self.gifts[gift_key]
+                            
+                            success = await self.send_gift(chat_id, gift["gift_id"], message_text)
+                            
+                            if success:
+                                sender_info = self.all_users.get(sender_id, {})
+                                sender_name = sender_info.get("first_name", "Кто-то")
+                                sender_username = sender_info.get("username", "")
+                                
+                                from_text = f"от <b>{sender_name}</b> ({sender_username})" if sender_username != "нет username" else f"от <b>{sender_name}</b>"
+                                notification = f"🎉 Ты получил {gift['emoji']} <b>{gift['name']}</b> {from_text}!"
+                                
+                                if message_text:
+                                    notification += f"\n\n💌 <i>{message_text}</i>"
+                                
+                                await self.send_message(chat_id, notification, parse_mode="HTML")
+                                
+                                await self.send_message(
+                                    sender_id,
+                                    f"✅ Твой подарок {gift['emoji']} доставлен @{username}!",
+                                    parse_mode="HTML"
+                                )
+                            
+                            del self.pending_gifts[payload_key]
+                    
+                    await self.send_gift_menu(chat_id)
                 
                 # /cancel
-                elif t == "/cancel":
-                    if c in self.states:
-                        if c in self.orders:
-                            await self.api("deleteMessage", chat_id=c, message_id=self.orders[c])
-                            del self.orders[c]
-                        if c in self.temps:
-                            for mid in self.temps[c]:
-                                await self.api("deleteMessage", chat_id=c, message_id=mid)
-                            del self.temps[c]
-                        del self.states[c]
-                        await self.api("sendMessage", chat_id=c, text="❌ Отменено\n\n/start")
+                elif text == "/cancel":
+                    if chat_id in self.user_states:
+                        await self.cancel_order(chat_id)
                     else:
-                        await self.api("sendMessage", chat_id=c, text="❌ Нет заказа")
+                        await self.send_message(chat_id, "❌ Нет активного заказа.")
                 
-                # Обработка ввода
-                elif c in self.states:
-                    s = self.states[c]
+                # Обработка состояний
+                elif chat_id in self.user_states:
+                    state = self.user_states[chat_id]
                     
                     # Ввод username
-                    if s.get("w") == "un":
-                        un_input = t.strip().lstrip("@")
-                        if len(un_input) < 5:
-                            await self.api("sendMessage", chat_id=c, text="❌ Минимум 5 символов!")
+                    if state.get("waiting_for") == "recipient_username":
+                        valid, result = self.validate_username(text)
+                        
+                        if not valid:
+                            error_msg_id = await self.send_message(chat_id, result)
+                            await self.delete_message(chat_id, message_id)
+                            
+                            if error_msg_id:
+                                await asyncio.sleep(3)
+                                await self.delete_message(chat_id, error_msg_id)
                             return
                         
-                        if un_input.lower() == un.lower():
-                            await self.api("sendMessage", chat_id=c, text="❌ Нельзя себе!")
+                        recipient_username = result
+                        
+                        if recipient_username.lower() == username.lower():
+                            error_msg_id = await self.send_message(
+                                chat_id,
+                                "❌ Нельзя отправить самому себе!\nВыбери 'Для себя'."
+                            )
+                            
+                            await self.delete_message(chat_id, message_id)
+                            
+                            if error_msg_id:
+                                await asyncio.sleep(3)
+                                await self.delete_message(chat_id, error_msg_id)
                             return
                         
-                        # Поиск в базе
-                        found = None
-                        for uid, ud in self.users.items():
-                            if ud["un"].lstrip("@").lower() == un_input.lower():
-                                found = uid
-                                break
+                        # Проверяем в базе
+                        found, user_id, first_name = self.check_username_in_database(recipient_username)
                         
-                        # Удаляем сообщения
-                        if c in self.temps:
-                            for mid in self.temps[c]:
-                                await self.api("deleteMessage", chat_id=c, message_id=mid)
-                            del self.temps[c]
-                        await self.api("deleteMessage", chat_id=c, message_id=m["message_id"])
+                        # Удаляем временные сообщения
+                        if chat_id in self.temp_messages:
+                            for msg_id in self.temp_messages[chat_id]:
+                                await self.delete_message(chat_id, msg_id)
+                            del self.temp_messages[chat_id]
+                        
+                        await self.delete_message(chat_id, message_id)
                         
                         if found:
-                            s["un"] = un_input
-                            s["uid"] = found
-                            s["w"] = None
-                            await self.upd(c, "anon")
+                            # Найден - сохраняем и идем дальше
+                            state["recipient_username"] = recipient_username
+                            state["recipient_user_id"] = user_id
+                            state["recipient_known"] = True
+                            state["waiting_for"] = None
+                            
+                            await self.update_order_message(chat_id, "message_choice")
                         else:
-                            s["pun"] = un_input
-                            s["w"] = None
-                            await self.upd(c, "nf")
+                            # Не найден - показываем предупреждение
+                            state["pending_recipient_username"] = recipient_username
+                            state["waiting_for"] = None
+                            
+                            await self.update_order_message(chat_id, "username_not_found")
                     
                     # Ввод подписи
-                    elif s.get("w") == "msg":
-                        if len(t.strip()) > 200:
-                            await self.api("sendMessage", chat_id=c, text="❌ Макс 200!")
+                    elif state.get("waiting_for") == "gift_message":
+                        message_text = text.strip()
+                        
+                        if len(message_text) > 200:
+                            error_msg_id = await self.send_message(
+                                chat_id,
+                                "❌ Подпись слишком длинная! Максимум 200 символов."
+                            )
+                            
+                            await self.delete_message(chat_id, message_id)
+                            
+                            if error_msg_id:
+                                await asyncio.sleep(3)
+                                await self.delete_message(chat_id, error_msg_id)
                             return
-                        s["msg"] = t.strip()
-                        s["w"] = None
-                        if c in self.temps:
-                            for mid in self.temps[c]:
-                                await self.api("deleteMessage", chat_id=c, message_id=mid)
-                            del self.temps[c]
-                        await self.api("deleteMessage", chat_id=c, message_id=m["message_id"])
-                        await self.upd(c, "ok")
+                        
+                        state["message"] = message_text
+                        state["waiting_for"] = None
+                        
+                        if chat_id in self.temp_messages:
+                            for msg_id in self.temp_messages[chat_id]:
+                                await self.delete_message(chat_id, msg_id)
+                            del self.temp_messages[chat_id]
+                        
+                        await self.delete_message(chat_id, message_id)
+                        await self.update_order_message(chat_id, "ready")
                     
-                    # Админ: блок
-                    elif s.get("w") == "bl":
-                        self.blocked.add(t.strip().lstrip("@").lower())
-                        s["w"] = None
-                        await self.api("sendMessage", chat_id=c, text=f"✅ Заблокирован!")
+                    # Админ команды
+                    elif state.get("waiting_for") == "block_username":
+                        username_to_block = text.strip().lstrip("@").lower()
+                        self.blocked_users.add(username_to_block)
+                        state["waiting_for"] = None
+                        await self.send_message(chat_id, f"✅ @{username_to_block} заблокирован!")
                     
-                    # Админ: разблок
-                    elif s.get("w") == "ubl":
-                        uname = t.strip().lstrip("@").lower()
-                        if uname in self.blocked:
-                            self.blocked.remove(uname)
-                            await self.api("sendMessage", chat_id=c, text="✅ Разблокирован!")
+                    elif state.get("waiting_for") == "unblock_username":
+                        username_to_unblock = text.strip().lstrip("@").lower()
+                        if username_to_unblock in self.blocked_users:
+                            self.blocked_users.remove(username_to_unblock)
+                            await self.send_message(chat_id, f"✅ @{username_to_unblock} разблокирован!")
                         else:
-                            await self.api("sendMessage", chat_id=c, text="❌ Не был заблокирован")
-                        s["w"] = None
+                            await self.send_message(chat_id, f"❌ @{username_to_unblock} не был заблокирован.")
+                        state["waiting_for"] = None
                     
-                    # Админ: рассылка
-                    elif s.get("w") == "br":
-                        kb = {"inline_keyboard": [[{"text": "✅ Да", "callback_data": "cbr"}], [{"text": "❌ Нет", "callback_data": "cbrc"}]]}
-                        s["brt"] = t.strip()
-                        s["w"] = None
-                        await self.api("sendMessage", chat_id=c, text=f"📢 Отправить {len(self.users)} юзерам?", reply_markup=kb)
+                    elif state.get("waiting_for") == "broadcast_text":
+                        broadcast_text = text.strip()
+                        
+                        keyboard = {
+                            "inline_keyboard": [
+                                [{"text": "✅ Отправить", "callback_data": "confirm_broadcast"}],
+                                [{"text": "❌ Отмена", "callback_data": "cancel_broadcast"}]
+                            ]
+                        }
+                        
+                        state["broadcast_text"] = broadcast_text
+                        state["waiting_for"] = None
+                        
+                        preview = f"📢 <b>Предпросмотр:</b>\n\n{broadcast_text}\n\nОтправить <b>{len(self.all_users)}</b> пользователям?"
+                        
+                        await self.send_message(chat_id, preview, parse_mode="HTML", reply_markup=keyboard)
             
-            # CALLBACK
-            if "callback_query" in u:
-                q = u["callback_query"]
-                c = q["message"]["chat"]["id"]
-                d = q["data"]
-                user = q["from"]
-                un = user.get("username", "")
+            # Обработка callback
+            if "callback_query" in update:
+                callback = update["callback_query"]
+                callback_query_id = callback["id"]
+                chat_id = callback["message"]["chat"]["id"]
+                callback_data = callback["data"]
+                user = callback.get("from", {})
+                username = user.get("username", "")
                 
-                # Регистрация при callback
-                if c not in self.users:
-                    self.users[c] = {"un": f"@{un}" if un else "нет", "name": user.get("first_name", "Юзер"), "t": time.time()}
-                    logger.info(f"Новый (callback): {c} @{un}")
-                else:
-                    self.users[c]["t"] = time.time()
-                
-                # ВСЕГДА отвечаем на callback
-                await self.api("answerCallbackQuery", callback_query_id=q["id"])
-                
-                # Блок
-                if un.lower() in self.blocked and not d.startswith("adm"):
+                if self.is_blocked(username) and not callback_data.startswith("admin_"):
+                    await self.answer_callback_query(callback_query_id, "🚫 Заблокирован!", show_alert=True)
                     return
                 
-                # Обработка callback
-                if d == "cunk":
-                    if c in self.states:
-                        s = self.states[c]
-                        s["un"] = s.get("pun")
-                        s["uid"] = None
-                        await self.upd(c, "anon")
+                # Подтверждение неизвестного username
+                if callback_data == "confirm_unknown":
+                    if chat_id in self.user_states:
+                        state = self.user_states[chat_id]
+                        recipient_username = state.get("pending_recipient_username")
+                        
+                        if recipient_username:
+                            state["recipient_username"] = recipient_username
+                            state["recipient_user_id"] = None
+                            state["recipient_known"] = False
+                            
+                            await self.update_order_message(chat_id, "message_choice")
+                            await self.answer_callback_query(callback_query_id)
                 
-                elif d == "reun":
-                    if c in self.states:
-                        self.states[c]["w"] = "un"
-                        self.states[c]["pun"] = None
-                        await self.upd(c, "wun")
-                        r = await self.api("sendMessage", chat_id=c, text="👤 Введи username:")
-                        if r.get("ok"):
-                            self.temps[c] = [r["result"]["message_id"]]
+                elif callback_data == "reenter_username":
+                    if chat_id in self.user_states:
+                        state = self.user_states[chat_id]
+                        state["waiting_for"] = "recipient_username"
+                        state["pending_recipient_username"] = None
+                        
+                        await self.update_order_message(chat_id, "waiting_username")
+                        
+                        prompt_msg_id = await self.send_message(chat_id, "👤 Введи username получателя:")
+                        
+                        if prompt_msg_id:
+                            self.temp_messages[chat_id] = [prompt_msg_id]
+                        
+                        await self.answer_callback_query(callback_query_id)
                 
-                elif d == "can":
-                    if c in self.states:
-                        if c in self.orders:
-                            await self.api("deleteMessage", chat_id=c, message_id=self.orders[c])
-                            del self.orders[c]
-                        if c in self.temps:
-                            for mid in self.temps[c]:
-                                await self.api("deleteMessage", chat_id=c, message_id=mid)
-                            del self.temps[c]
-                        del self.states[c]
-                        await self.api("sendMessage", chat_id=c, text="❌ Отменено\n\n/start")
+                # Отмена
+                elif callback_data == "cancel_order":
+                    await self.cancel_order(chat_id)
+                    await self.answer_callback_query(callback_query_id)
+                    return
                 
-                elif d == "adm":
-                    if c == ADMIN_ID:
-                        kb = {"inline_keyboard": [[{"text": "🚫 Блок", "callback_data": "abl"}], [{"text": "✅ Разблок", "callback_data": "aubl"}], [{"text": "👥 Юзеры", "callback_data": "au"}], [{"text": "📢 Рассылка", "callback_data": "abr"}], [{"text": "🔙 Назад", "callback_data": "back"}]]}
-                        await self.api("sendMessage", chat_id=c, text=f"👑 <b>АДМИН</b>\n\n📊 Юзеров: {len(self.users)}\n🚫 Заблок: {len(self.blocked)}", parse_mode="HTML", reply_markup=kb)
+                # Админ панель
+                elif callback_data == "admin_panel":
+                    if chat_id == self.admin_id:
+                        await self.send_admin_panel(chat_id)
+                        await self.answer_callback_query(callback_query_id)
+                    else:
+                        await self.answer_callback_query(callback_query_id, "⛔️ Нет доступа!", show_alert=True)
                 
-                elif d == "back":
-                    kb = {"inline_keyboard": [[{"text": f"{g['emoji']} {g['name']} - {g['price']}⭐️", "callback_data": k}] for k, g in GIFTS.items()]}
-                    if c == ADMIN_ID:
-                        kb["inline_keyboard"].append([{"text": "👑 Админ", "callback_data": "adm"}])
-                    await self.api("sendMessage", chat_id=c, text="🎁 <b>Магазин</b>\n\nВыбери:", parse_mode="HTML", reply_markup=kb)
+                elif callback_data == "back_to_shop":
+                    await self.send_gift_menu(chat_id)
+                    await self.answer_callback_query(callback_query_id)
                 
-                elif d == "abl":
-                    if c == ADMIN_ID:
-                        self.states[c] = {"w": "bl"}
-                        await self.api("sendMessage", chat_id=c, text="🚫 Username:")
+                elif callback_data == "admin_block":
+                    if chat_id == self.admin_id:
+                        self.user_states[chat_id] = {"waiting_for": "block_username"}
+                        await self.send_message(chat_id, "🚫 Введи username:")
+                        await self.answer_callback_query(callback_query_id)
                 
-                elif d == "aubl":
-                    if c == ADMIN_ID:
-                        self.states[c] = {"w": "ubl"}
-                        await self.api("sendMessage", chat_id=c, text="✅ Username:")
+                elif callback_data == "admin_unblock":
+                    if chat_id == self.admin_id:
+                        self.user_states[chat_id] = {"waiting_for": "unblock_username"}
+                        await self.send_message(chat_id, "✅ Введи username:")
+                        await self.answer_callback_query(callback_query_id)
                 
-                elif d == "au":
-                    if c == ADMIN_ID:
-                        us = sorted(self.users.items(), key=lambda x: x[1]["t"], reverse=True)[:10]
-                        txt = "👥 <b>Последние 10:</b>\n\n"
-                        for i, (uid, ud) in enumerate(us, 1):
-                            txt += f"{i}. <b>{ud['name']}</b> {ud['un']}\n<code>{uid}</code>\n\n"
-                        await self.api("sendMessage", chat_id=c, text=txt, parse_mode="HTML")
+                elif callback_data == "admin_users":
+                    if chat_id == self.admin_id:
+                        sorted_users = sorted(self.all_users.items(), key=lambda x: x[1]["last_seen"], reverse=True)
+                        
+                        users_text = "👥 <b>Последние 10:</b>\n\n"
+                        
+                        for i, (uid, udata) in enumerate(sorted_users[:10], 1):
+                            uname = udata["username"]
+                            fname = udata["first_name"]
+                            lseen = time.strftime("%d.%m %H:%M", time.localtime(udata["last_seen"]))
+                            
+                            users_text += f"{i}. <b>{fname}</b> ({uname})\n   <code>{uid}</code> - {lseen}\n\n"
+                        
+                        await self.send_message(chat_id, users_text, parse_mode="HTML")
+                        await self.answer_callback_query(callback_query_id)
                 
-                elif d == "abr":
-                    if c == ADMIN_ID:
-                        self.states[c] = {"w": "br"}
-                        await self.api("sendMessage", chat_id=c, text="📢 Текст:")
+                elif callback_data == "admin_broadcast":
+                    if chat_id == self.admin_id:
+                        self.user_states[chat_id] = {"waiting_for": "broadcast_text"}
+                        await self.send_message(chat_id, "📢 Введи текст:")
+                        await self.answer_callback_query(callback_query_id)
                 
-                elif d == "cbr":
-                    if c == ADMIN_ID and c in self.states:
-                        txt = self.states[c].get("brt")
-                        if txt:
+                elif callback_data == "confirm_broadcast":
+                    if chat_id == self.admin_id and chat_id in self.user_states:
+                        broadcast_text = self.user_states[chat_id].get("broadcast_text")
+                        
+                        if broadcast_text:
                             sent = 0
-                            for uid in self.users:
-                                if (await self.api("sendMessage", chat_id=uid, text=txt, parse_mode="HTML")).get("ok"):
+                            for uid in self.all_users:
+                                msg_id = await self.send_message(uid, broadcast_text, parse_mode="HTML")
+                                if msg_id:
                                     sent += 1
                                 await asyncio.sleep(0.05)
-                            await self.api("sendMessage", chat_id=c, text=f"✅ Отправлено: {sent}")
-                        del self.states[c]
+                            
+                            await self.send_message(chat_id, f"✅ Отправлено: {sent}")
+                        
+                        del self.user_states[chat_id]
+                        await self.answer_callback_query(callback_query_id)
                 
-                elif d == "cbrc":
-                    if c in self.states:
-                        del self.states[c]
-                    await self.api("sendMessage", chat_id=c, text="❌ Отменено")
+                elif callback_data == "cancel_broadcast":
+                    if chat_id in self.user_states:
+                        del self.user_states[chat_id]
+                    await self.send_message(chat_id, "❌ Отменено.")
+                    await self.answer_callback_query(callback_query_id)
                 
                 # Выбор подарка
-                elif d in GIFTS:
-                    if c in self.states and self.states[c].get("inv"):
+                elif callback_data in self.gifts:
+                    if chat_id in self.user_states and self.user_states[chat_id].get("invoice_sent_at"):
+                        await self.answer_callback_query(callback_query_id, "⚠️ Активный заказ! /cancel", show_alert=True)
                         return
-                    self.states[c] = {"gk": d}
-                    await self.upd(c, "rec")
+                    
+                    self.user_states[chat_id] = {"gift_key": callback_data}
+                    await self.update_order_message(chat_id, "recipient")
+                    await self.answer_callback_query(callback_query_id)
                 
-                # Для себя
-                elif d.startswith("rs_"):
-                    gk = d[3:]
-                    self.states[c] = {"gk": gk, "rec": "self", "un": "self"}
-                    await self.upd(c, "anon")
+                # Получатель
+                elif callback_data.startswith("recipient_self_"):
+                    gift_key = callback_data.replace("recipient_self_", "")
+                    
+                    if chat_id not in self.user_states:
+                        self.user_states[chat_id] = {}
+                    
+                    self.user_states[chat_id]["gift_key"] = gift_key
+                    self.user_states[chat_id]["recipient"] = "self"
+                    self.user_states[chat_id]["recipient_username"] = "self"
+                    
+                    await self.update_order_message(chat_id, "message_choice")
+                    await self.answer_callback_query(callback_query_id)
                 
-                # Для другого
-                elif d.startswith("ro_"):
-                    gk = d[3:]
-                    self.states[c] = {"gk": gk, "rec": "other", "w": "un"}
-                    await self.upd(c, "wun")
-                    r = await self.api("sendMessage", chat_id=c, text="👤 Введи username:")
-                    if r.get("ok"):
-                        self.temps[c] = [r["result"]["message_id"]]
+                elif callback_data.startswith("recipient_other_"):
+                    gift_key = callback_data.replace("recipient_other_", "")
+                    
+                    if chat_id not in self.user_states:
+                        self.user_states[chat_id] = {}
+                    
+                    self.user_states[chat_id]["gift_key"] = gift_key
+                    self.user_states[chat_id]["recipient"] = "other"
+                    self.user_states[chat_id]["waiting_for"] = "recipient_username"
+                    
+                    await self.update_order_message(chat_id, "waiting_username")
+                    
+                    prompt_msg_id = await self.send_message(chat_id, "👤 Введи username получателя:")
+                    
+                    if prompt_msg_id:
+                        self.temp_messages[chat_id] = [prompt_msg_id]
+                    
+                    await self.answer_callback_query(callback_query_id)
                 
-                # Анонимность: да
-                elif d == "ay":
-                    if c in self.states:
-                        self.states[c]["anon"] = True
-                        self.states[c]["acs"] = True
-                        await self.upd(c, "msgc")
+                # Подпись
+                elif callback_data == "msg_with":
+                    if chat_id in self.user_states:
+                        self.user_states[chat_id]["has_message"] = "with"
+                        self.user_states[chat_id]["waiting_for"] = "gift_message"
+                        
+                        await self.update_order_message(chat_id, "waiting_message")
+                        
+                        prompt_msg_id = await self.send_message(chat_id, "📝 Введи подпись (макс 200 символов):")
+                        
+                        if prompt_msg_id:
+                            self.temp_messages[chat_id] = [prompt_msg_id]
+                        
+                        await self.answer_callback_query(callback_query_id)
                 
-                # Анонимность: нет
-                elif d == "an":
-                    if c in self.states:
-                        self.states[c]["anon"] = False
-                        self.states[c]["acs"] = True
-                        await self.upd(c, "msgc")
+                elif callback_data == "msg_without":
+                    if chat_id in self.user_states:
+                        self.user_states[chat_id]["has_message"] = "without"
+                        self.user_states[chat_id]["message"] = None
+                        
+                        await self.update_order_message(chat_id, "ready")
+                        await self.answer_callback_query(callback_query_id)
                 
-                # Подпись: да
-                elif d == "mw":
-                    if c in self.states:
-                        self.states[c]["hm"] = "y"
-                        self.states[c]["w"] = "msg"
-                        await self.upd(c, "wmsg")
-                        r = await self.api("sendMessage", chat_id=c, text="📝 Подпись (макс 200):")
-                        if r.get("ok"):
-                            self.temps[c] = [r["result"]["message_id"]]
-                
-                # Подпись: нет
-                elif d == "mn":
-                    if c in self.states:
-                        self.states[c]["hm"] = "n"
-                        self.states[c]["msg"] = None
-                        await self.upd(c, "ok")
-                
-                # Оплатить
-                elif d == "pay":
-                    if c in self.states:
-                        await self.api("sendMessage", chat_id=c, text="⚠️ <b>ВАЖНО:</b>\n• Подарки нельзя продать\n• Проверь данные!", parse_mode="HTML")
+                # Оплата
+                elif callback_data == "proceed_payment":
+                    if chat_id in self.user_states:
+                        disclaimer = (
+                            "⚠️ <b>ВАЖНО:</b>\n\n"
+                            "• Подарок будет отправлен после оплаты\n"
+                            "• Подарки <b>нельзя продать</b>\n"
+                            "• Проверь все данные!\n\n"
+                            "Счет отправлен ниже 👇"
+                        )
+                        await self.send_message(chat_id, disclaimer, parse_mode="HTML")
                         await asyncio.sleep(1)
-                        await self.inv(c)
+                        
+                        await self.send_invoice(chat_id)
+                        await self.answer_callback_query(callback_query_id)
             
-            # PRE-CHECKOUT
-            if "pre_checkout_query" in u:
-                await self.api("answerPreCheckoutQuery", pre_checkout_query_id=u["pre_checkout_query"]["id"], ok=True)
+            # Pre-checkout
+            if "pre_checkout_query" in update:
+                pre_checkout = update["pre_checkout_query"]
+                pre_checkout_id = pre_checkout["id"]
+                
+                async with aiohttp.ClientSession() as session:
+                    url = f"{self.base_url}/answerPreCheckoutQuery"
+                    payload = {"pre_checkout_query_id": pre_checkout_id, "ok": True}
+                    await session.post(url, json=payload)
             
-            # PAYMENT
-            if "message" in u and "successful_payment" in u["message"]:
-                m = u["message"]
-                c = m["chat"]["id"]
-                pid = m["successful_payment"]["telegram_payment_charge_id"]
+            # Оплата
+            if "message" in update and "successful_payment" in update["message"]:
+                message = update["message"]
+                chat_id = message["chat"]["id"]
+                payment = message["successful_payment"]
+                payment_id = payment.get("telegram_payment_charge_id")
                 
-                if pid in self.payments:
+                logger.info(f"💰 ОПЛАТА: {payment_id}")
+                
+                if payment_id in self.processed_payments:
                     return
-                self.payments.add(pid)
                 
-                if c not in self.states:
+                self.processed_payments.add(payment_id)
+                
+                if chat_id not in self.user_states:
                     return
                 
-                s = self.states[c]
-                g = GIFTS[s["gk"]]
-                un = s.get("un", "self")
-                msg = s.get("msg")
-                anon = s.get("anon", False)
+                state = self.user_states[chat_id]
+                gift_key = state.get("gift_key")
+                recipient = state.get("recipient_username", "self")
+                message_text = state.get("message")
+                
+                if not gift_key or gift_key not in self.gifts:
+                    return
+                
+                gift = self.gifts[gift_key]
                 
                 # Для себя
-                if un == "self":
-                    await self.api("sendMessage", chat_id=c, text=f"⏳ Отправляю {g['emoji']}...")
+                if recipient == "self":
+                    await self.send_message(chat_id, f"⏳ Отправляю {gift['emoji']}...")
+                    
                     await asyncio.sleep(1)
-                    r = await self.api("sendGift", user_id=c, gift_id=g["gift_id"], text=msg, pay_for_upgrade=anon)
-                    if r.get("ok"):
-                        await self.api("sendMessage", chat_id=c, text=f"🎉 {g['emoji']} <b>{g['name']}</b>!\n\n/start", parse_mode="HTML")
+                    success = await self.send_gift(chat_id, gift['gift_id'], message_text)
+                    
+                    if success:
+                        await self.send_message(
+                            chat_id,
+                            f"🎉 Ты получил {gift['emoji']} <b>{gift['name']}</b>!\n\n/start",
+                            parse_mode="HTML"
+                        )
                     else:
-                        await self.api("sendMessage", chat_id=c, text="❌ Ошибка")
+                        await self.send_message(chat_id, "❌ Ошибка. Обратись в поддержку.")
                 
                 # Для другого
                 else:
-                    uid = s.get("uid")
-                    if uid:
-                        r = await self.api("sendGift", user_id=uid, gift_id=g["gift_id"], text=msg, pay_for_upgrade=anon)
-                        if r.get("ok"):
-                            txt = f"🎉 {g['emoji']} <b>{g['name']}</b>"
-                            if anon:
-                                txt += " 🎭 анонимно!"
-                            else:
-                                snd = self.users.get(c, {})
-                                txt += f" от <b>{snd.get('name', 'Кто-то')}</b>!"
-                            if msg:
-                                txt += f"\n\n💌 {msg}"
-                            await self.api("sendMessage", chat_id=uid, text=txt, parse_mode="HTML")
-                            await self.api("sendMessage", chat_id=c, text=f"✅ Доставлено @{un}!")
+                    recipient_id = state.get("recipient_user_id")
+                    
+                    if recipient_id:
+                        # Отправляем сразу
+                        success = await self.send_gift(recipient_id, gift['gift_id'], message_text)
+                        
+                        if success:
+                            sender_info = self.all_users.get(chat_id, {})
+                            sender_name = sender_info.get("first_name", "Кто-то")
+                            notif = f"🎉 Ты получил {gift['emoji']} <b>{gift['name']}</b> от <b>{sender_name}</b>!"
+                            
+                            if message_text:
+                                notif += f"\n\n💌 <i>{message_text}</i>"
+                            
+                            await self.send_message(recipient_id, notif, parse_mode="HTML")
+                            await self.send_message(chat_id, f"✅ Подарок доставлен @{recipient}!")
                         else:
-                            await self.api("sendMessage", chat_id=c, text="❌ Ошибка")
+                            await self.send_message(chat_id, "❌ Ошибка.")
                     else:
-                        self.pending[s.get("pl")] = {"gk": s["gk"], "sid": c, "un": un, "msg": msg, "anon": anon}
-                        await self.api("sendMessage", chat_id=c, text=f"✅ Оплачено! Доставится когда @{un} напишет /start")
+                        # Сохраняем для отправки позже
+                        payload_key = state.get("payload")
+                        self.pending_gifts[payload_key] = {
+                            "gift_key": gift_key,
+                            "sender_id": chat_id,
+                            "recipient_username": recipient,
+                            "message": message_text
+                        }
+                        
+                        await self.send_message(
+                            chat_id,
+                            f"✅ Оплачено! Подарок будет доставлен когда @{recipient} напишет /start",
+                            parse_mode="HTML"
+                        )
                 
                 # Очистка
-                if c in self.states:
-                    del self.states[c]
-                if c in self.orders:
-                    del self.orders[c]
-                if c in self.temps:
-                    del self.temps[c]
-        
+                if chat_id in self.user_states:
+                    del self.user_states[chat_id]
+                if chat_id in self.order_messages:
+                    del self.order_messages[chat_id]
+                if chat_id in self.temp_messages:
+                    del self.temp_messages[chat_id]
+                    
         except Exception as e:
-            logger.error(f"handle: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             import traceback
             logger.error(traceback.format_exc())
     
-    async def upd(self, c, step):
-        """Обновление сообщения заказа"""
-        s = self.states[c]
-        g = GIFTS[s["gk"]]
+    async def run(self):
+        """Основной цикл"""
+        logger.info("🚀 БОТ ЗАПУЩЕН")
         
-        # ПРАВИЛЬНЫЙ расчет цены
-        anon = s.get("anon", False)
-        bp = g["price"]
-        tp = self.calc_price(s["gk"], anon)
+        bot_username = await self.get_bot_username()
+        print("\n" + "="*50)
+        print("✅ БОТ РАБОТАЕТ!")
+        print(f"👉 https://t.me/{bot_username}")
+        print(f"👑 Админ: {self.admin_id}")
+        print("="*50 + "\n")
         
-        txt = f"✨ <b>{g['name']}</b>\n💰 Цена: <b>{bp}⭐️</b>\n"
-        if anon:
-            txt += f"🎭 Анонимность: <b>+{ANONYMOUS_PRICE}⭐️</b>\n"
-        txt += f"💵 <b>ИТОГО: {tp}⭐️</b>\n\n"
+        offset = 0
+        error_count = 0
         
-        # Получатель
-        if s.get("rec") == "self":
-            txt += "👤 <b>Для себя</b>\n"
-        elif s.get("rec") == "other":
-            if s.get("un"):
-                txt += f"👤 <b>@{s['un']}</b>\n"
-            else:
-                txt += "👤 ⏳\n"
-        else:
-            txt += "👤 <i>не выбрано</i>\n"
-        
-        # Анонимность
-        if s.get("acs"):
-            txt += f"🎭 <b>{'Анонимно' if anon else 'С именем'}</b>\n"
-        else:
-            txt += "🎭 <i>не выбрано</i>\n"
-        
-        # Подпись
-        if s.get("hm") == "y":
-            if s.get("msg"):
-                txt += f"💌 {s['msg']}\n"
-            else:
-                txt += "💌 ⏳\n"
-        elif s.get("hm") == "n":
-            txt += "💌 <b>Нет</b>\n"
-        else:
-            txt += "💌 <i>не выбрано</i>\n"
-        
-        kb = {"inline_keyboard": []}
-        
-        if step == "rec":
-            txt += "\n👇 <b>Для кого?</b>"
-            kb["inline_keyboard"] = [
-                [{"text": "🎁 Для себя", "callback_data": f"rs_{s['gk']}"}],
-                [{"text": "💝 Для другого", "callback_data": f"ro_{s['gk']}"}],
-                [{"text": "❌ Отменить", "callback_data": "can"}]
-            ]
-        elif step == "wun":
-            txt += "\n⏳ <b>Жду username...</b>"
-            kb["inline_keyboard"] = [[{"text": "❌ Отменить", "callback_data": "can"}]]
-        elif step == "nf":
-            txt += f"\n\n⚠️ <b>@{s.get('pun')} не писал боту</b>\n\nПодарок отправится когда напишет /start\n\n👇"
-            kb["inline_keyboard"] = [
-                [{"text": "✅ Да", "callback_data": "cunk"}],
-                [{"text": "🔄 Другой", "callback_data": "reun"}],
-                [{"text": "❌ Отменить", "callback_data": "can"}]
-            ]
-        elif step == "anon":
-            txt += f"\n👇 <b>Анонимно? (+{ANONYMOUS_PRICE}⭐️)</b>"
-            kb["inline_keyboard"] = [
-                [{"text": f"🎭 Да (+{ANONYMOUS_PRICE}⭐️)", "callback_data": "ay"}],
-                [{"text": "👤 Нет", "callback_data": "an"}],
-                [{"text": "❌ Отменить", "callback_data": "can"}]
-            ]
-        elif step == "msgc":
-            txt += "\n👇 <b>Подпись?</b>"
-            kb["inline_keyboard"] = [
-                [{"text": "📝 Да", "callback_data": "mw"}],
-                [{"text": "🎁 Нет", "callback_data": "mn"}],
-                [{"text": "❌ Отменить", "callback_data": "can"}]
-            ]
-        elif step == "wmsg":
-            txt += "\n⏳ <b>Жду подпись...</b>"
-            kb["inline_keyboard"] = [[{"text": "❌ Отменить", "callback_data": "can"}]]
-        elif step == "ok":
-            txt += "\n\n✅ <b>Готово!</b>"
-            kb["inline_keyboard"] = [
-                [{"text": "💳 Оплатить", "callback_data": "pay"}],
-                [{"text": "❌ Отменить", "callback_data": "can"}]
-            ]
-        elif step == "sent":
-            txt += "\n\n💳 <b>Счет отправлен!</b>\n⏰ Оплати за 15 мин | /cancel"
-            kb["inline_keyboard"] = []
-        
-        mid = self.orders.get(c)
-        if mid:
-            await self.api("editMessageText", chat_id=c, message_id=mid, text=txt, parse_mode="HTML", reply_markup=kb)
-        else:
-            r = await self.api("sendMessage", chat_id=c, text=txt, parse_mode="HTML", reply_markup=kb)
-            if r.get("ok"):
-                self.orders[c] = r["result"]["message_id"]
+        while True:
+            try:
+                updates = await self.get_updates(offset)
+                
+                for update in updates:
+                    offset = update["update_id"] + 1
+                    await self.process_update(update)
+                
+                error_count = 0
+                await asyncio.sleep(0.1)
+                
+            except KeyboardInterrupt:
+                print("\n🛑 Остановлен")
+                break
+            except Exception as e:
+                error_count += 1
+                logger.error(f"❌ Ошибка ({error_count}): {e}")
+                
+                if error_count > 10:
+                    print("\n🔴 КРИТИЧЕСКАЯ ОШИБКА")
+                    break
+                
+                await asyncio.sleep(2)
     
-    async def inv(self, c):
-        """Отправка инвойса"""
-        s = self.states[c]
-        g = GIFTS[s["gk"]]
-        anon = s.get("anon", False)
-        
-        # ПРАВИЛЬНЫЙ расчет цены
-        tp = self.calc_price(s["gk"], anon)
-        
-        pl = f"{s['gk']}_{c}_{int(time.time()*1000)}"
-        s["pl"] = pl
-        s["inv"] = time.time()
-        
-        # ПРАВИЛЬНЫЕ prices
-        prices = [{"label": g["name"], "amount": g["price"]}]
-        if anon:
-            prices.append({"label": "🎭 Анонимность", "amount": ANONYMOUS_PRICE})
-        
-        logger.info(f"💳 Инвойс: {tp}⭐️ | Анон: {anon} | Prices: {prices}")
-        
-        r = await self.api(
-            "sendInvoice",
-            chat_id=c,
-            title=f"{g['emoji']} {g['name']}",
-            description=f"Оплата {tp}⭐️ | /cancel",
-            payload=pl,
-            currency="XTR",
-            prices=prices
-        )
-        
-        if r.get("ok"):
-            await self.upd(c, "sent")
-        else:
-            logger.error(f"❌ Инвойс: {r.get('description')}")
-            await self.api("sendMessage", chat_id=c, text=f"❌ Ошибка инвойса: {r.get('description')}")
+    async def get_bot_username(self):
+        """Получение username"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/getMe"
+                async with session.get(url) as response:
+                    result = await response.json()
+                    if result.get("ok"):
+                        return result["result"].get("username", "бот")
+                    return "бот"
+        except:
+            return "бот"
+
+async def main():
+    sender = GiftSender(bot_token=BOT_TOKEN, gifts=GIFTS, admin_id=ADMIN_ID)
+    await sender.run()
 
 if __name__ == "__main__":
     try:
-        asyncio.run(Bot().run())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋")
+        print("\n👋 Пока!")
+
