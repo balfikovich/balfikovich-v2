@@ -18,13 +18,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== НАСТРОЙКИ ==========
-BOT_TOKEN = “8442227835:AAEm4UYtkDX8TrTpilX5iDJhxnMegkVdmzM”
+BOT_TOKEN = "8442227835:AAEm4UYtkDX8TrTpilX5iDJhxnMegkVdmzM"
 ADMIN_ID = 5479063264
 
 # Настройки Telethon (юзер-аккаунт для анонимных подарков)
 API_ID = 24174609           # Твой api_id с my.telegram.org
-API_HASH = “ff615e3534b9b0649bf9c82c7226c249”  # Твой api_hash с my.telegram.org
-PHONE = “+380931147007”      # Номер телефона юзер-аккаунта
+API_HASH = "ff615e3534b9b0649bf9c82c7226c249"  # Твой api_hash с my.telegram.org
+PHONE = "+380931147007"      # Номер телефона юзер-аккаунта
 
 # Стоимость анонимности в звёздах (редактируй тут)
 ANONYMITY_PRICE = 1
@@ -40,7 +40,7 @@ GIFTS = {
     "gift_2": {
         "name": "🧸 Новогодний мишка",
         "emoji": "🧸",
-        "price": 49,
+        "price": 50,
         "gift_id": "5956217000635139069"
     },
     "gift_3": {
