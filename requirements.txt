@@ -2,3 +2,4 @@ aiohttp==3.9.1
 aiogram==3.17.0
 python-dotenv==1.0.1
 aiosqlite==0.20.0
+telethon
