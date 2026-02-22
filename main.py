@@ -18,6 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== НАСТРОЙКИ ==========
+
 BOT_TOKEN = "8442227835:AAEm4UYtkDX8TrTpilX5iDJhxnMegkVdmzM"
 ADMIN_ID = 5479063264
 
@@ -28,6 +29,9 @@ PHONE = "+380934545223"      # Номер телефона юзер-аккаун
 
 # Стоимость анонимности в звёздах (редактируй тут)
 ANONYMITY_PRICE = 1
+
+# Порог баланса для уведомления админа (редактируй тут)
+LOW_BALANCE_THRESHOLD = 50
 
 # Список подарков
 GIFTS = {
@@ -76,35 +80,77 @@ async def init_telethon():
         return False
 
 
-async def send_gift_anonymous(recipient_user_id: int, gift_id: int, message_text: str = None):
-    """
-    Отправка анонимного подарка через Telethon (юзер-аккаунт).
-    hide_name=True скрывает ник отправителя -- подарок будет "Аноним".
-    """
+async def get_stars_balance() -> int:
+    global telethon_client
+    try:
+        if not telethon_client or not telethon_client.is_connected():
+            await init_telethon()
+        from telethon.tl.functions.payments import GetStarsBalanceRequest
+        me = await telethon_client.get_me()
+        result = await telethon_client(GetStarsBalanceRequest(peer=me))
+        balance = result.balance.amount if hasattr(result, "balance") else 0
+        logger.info(f"Stars balance: {balance}")
+        return balance
+    except Exception as e:
+        logger.error(f"Balance check error: {e}")
+        return -1
+
+
+async def notify_admin_low_balance(bot_base_url: str, admin_id: int, balance: int):
+    try:
+        async with aiohttp.ClientSession() as session:
+            lines = [
+                "<b>NIZKIY BALANS ZVEZD!</b>",
+                "",
+                "Na yuzер-akkaunte ostalos: <b>" + str(balance) + " zvezd</b>",
+                "Porog uvedomleniya: <b>" + str(LOW_BALANCE_THRESHOLD) + " zvezd</b>",
+                "",
+                "Popolni balans chtoby anonimnye podarki rabotali!"
+            ]
+            sep = chr(10)
+            text = sep.join(lines)
+            url = bot_base_url + "/sendMessage"
+            payload = {"chat_id": admin_id, "text": text, "parse_mode": "HTML"}
+            await session.post(url, json=payload)
+    except Exception as e:
+        logger.error("Admin notify error: " + str(e))
+
+
+async def send_gift_anonymous(recipient_user_id: int, gift_id: int, message_text: str = None, bot_base_url: str = None, admin_id: int = None):
     global telethon_client
     try:
         if not telethon_client or not telethon_client.is_connected():
             await init_telethon()
 
-        from telethon.tl.functions.payments import SendStarGiftRequest
-        from telethon.tl.types import InputUser
+        balance = await get_stars_balance()
 
-        # Получаем entity получателя
+        if balance != -1:
+            if balance <= LOW_BALANCE_THRESHOLD and bot_base_url and admin_id:
+                await notify_admin_low_balance(bot_base_url, admin_id, balance)
+            if balance <= 0:
+                logger.warning(f"Not enough stars! Balance: {balance}")
+                return "no_balance"
+
+        from telethon.tl.functions.payments import SendStarGiftRequest
         recipient = await telethon_client.get_entity(recipient_user_id)
 
         result = await telethon_client(SendStarGiftRequest(
-            hide_name=True,        # ← ВОТ ЭТО -- анонимность
+            hide_name=True,
             include_upgrade=False,
             peer=recipient,
             gift_id=int(gift_id),
             message=tl_types.TextWithEntities(text=message_text, entities=[]) if message_text else None
         ))
 
-        logger.info(f"✅ Анонимный подарок отправлен: {result}")
+        logger.info(f"Anonymous gift sent: {result}")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Ошибка анонимной отправки: {e}")
+        err = str(e).lower()
+        if "stars" in err or "balance" in err or "insufficient" in err:
+            logger.warning(f"Not enough stars: {e}")
+            return "no_balance"
+        logger.error(f"Anonymous gift error: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return False
@@ -292,7 +338,7 @@ class GiftSender:
                 anon_btn_text = f"🎭 Анонимность ✅ (+{ANONYMITY_PRICE} ⭐️)" if is_anonymous else f"🎭 Добавить анонимность (+{ANONYMITY_PRICE} ⭐️)"
                 
                 summary += f"\n\n🎭 <b>Анонимность:</b> скрывает имя отправителя.\n"
-                summary += f"Подарок придёт как «Аноним» (+{ANONYMITY_PRICE} ⭐️)\n"
+                summary += f"Podarak pridet kak Anonim (+{ANONYMITY_PRICE} zvezd)\n"
                 summary += "\n👇 <b>Выбери опции:</b>"
                 keyboard["inline_keyboard"] = [
                     [{"text": anon_btn_text, "callback_data": "toggle_anonymity"}],
@@ -445,10 +491,8 @@ class GiftSender:
             state["payload"] = unique_payload
             state["invoice_sent_at"] = time.time()
             
-            # Формируем позиции чека
-            prices = [{"label": gift['name'], "amount": gift['price']}]
-            if is_anonymous:
-                prices.append({"label": "🎭 Анонимность", "amount": ANONYMITY_PRICE})
+            # ОДНА позиция с итоговой суммой (Telegram Stars требует ровно 1 позицию)
+            prices = [{"label": gift['name'], "amount": total_price}]
             
             logger.info(f"💳 Инвойс: {total_price}⭐️ (анонимность: {is_anonymous})")
             
@@ -568,7 +612,7 @@ class GiftSender:
                         gift = self.gifts[gift_key]
                         
                         if is_anonymous:
-                            success = await send_gift_anonymous(chat_id, gift["gift_id"], gift_message)
+                            success = await send_gift_anonymous(chat_id, gift["gift_id"], gift_message, self.base_url, self.admin_id)
                         else:
                             success = await self.send_gift(chat_id, gift["gift_id"], gift_message)
                         
@@ -934,27 +978,48 @@ class GiftSender:
                         # Отправляем сразу
                         if is_anonymous:
                             # Через Telethon -- анонимно
-                            success = await send_gift_anonymous(recipient_id, gift['gift_id'], gift_message)
+                            success = await send_gift_anonymous(recipient_id, gift['gift_id'], gift_message, self.base_url, self.admin_id)
                         else:
                             # Обычно через Bot API
                             success = await self.send_gift(recipient_id, gift['gift_id'], gift_message)
                         
-                        if success:
+                        if success == True:
                             sender_info = self.all_users.get(chat_id, {})
                             sender_name = sender_info.get("first_name", "Кто-то")
                             
                             if is_anonymous:
-                                notif = f"🎉 Ты получил {gift['emoji']} <b>{gift['name']}</b> от Анонима! 🎭"
+                                notif = f"🎉 Ты получил {gift['emoji']} <b>{gift['name']}</b> ot Anonima! 🎭"
                             else:
-                                notif = f"🎉 Ты получил {gift['emoji']} <b>{gift['name']}</b> от <b>{sender_name}</b>!"
+                                notif = f"🎉 Ты получил {gift['emoji']} <b>{gift['name']}</b> ot <b>{sender_name}</b>!"
                             
                             if gift_message:
                                 notif += f"\n\n💌 <i>{gift_message}</i>"
                             
                             await self.send_message(recipient_id, notif, parse_mode="HTML")
-                            await self.send_message(chat_id, f"✅ Подарок {'анонимно ' if is_anonymous else ''}доставлен @{recipient}!")
+                            await self.send_message(chat_id, f"✅ Podarok {'anonimno ' if is_anonymous else ''}dostavlen @{recipient}!")
+                        elif success == "no_balance":
+                            # Нет звёзд -- откладываем подарок
+                            payload_key = state.get("payload") or f"delayed_{chat_id}_{int(time.time())}"
+                            self.pending_gifts[payload_key] = {
+                                "gift_key": gift_key,
+                                "sender_id": chat_id,
+                                "recipient_username": recipient,
+                                "recipient_user_id": recipient_id,
+                                "message": gift_message,
+                                "is_anonymous": is_anonymous
+                            }
+                            await self.send_message(
+                                chat_id,
+                                f"✅ Oplata poluchena!\n\n⏳ <b>Podarok budet otpravlen v blizhaishee vremya.</b>\n\nSpasibo za pokupku!",
+                                parse_mode="HTML"
+                            )
+                            await self.send_message(
+                                self.admin_id,
+                                f"⚠️ <b>NOVYI OTLOZHENNYI PODAROK!</b>\n\nPopolni balans zvezd na yuzер-akkaуnte!\n\nPodarok: {gift['name']}\nPoluchatel: @{recipient}\nAnonimost: {'Da' if is_anonymous else 'Net'}",
+                                parse_mode="HTML"
+                            )
                         else:
-                            await self.send_message(chat_id, "❌ Ошибка. Обратись в поддержку.")
+                            await self.send_message(chat_id, "❌ Oshibka. Obratisya v podderzhku.")
                     else:
                         # Получатель не писал боту -- откладываем
                         payload_key = state.get("payload")
