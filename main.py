@@ -100,7 +100,6 @@ class GiftSender:
         return False, None, None
 
     def calc_total(self, chat_id: int) -> int:
-        """Единый метод подсчёта итоговой суммы — используется везде"""
         state = self.user_states.get(chat_id, {})
         gift_key = state.get("gift_key")
         if not gift_key or gift_key not in self.gifts:
@@ -247,7 +246,6 @@ class GiftSender:
                     }) as response:
                         result = await response.json()
                         if not result.get("ok"):
-                            # Сообщение не редактируется — удаляем и шлём новое
                             logger.warning(f"editMessageText failed ({result.get('description')}), resending")
                             del self.order_messages[chat_id]
                             return await self.update_order_message(chat_id, step)
@@ -269,31 +267,45 @@ class GiftSender:
 
     # ─────────────────────────────────────────
     # ОТПРАВКА ПОДАРКА
+    # ИСПРАВЛЕНО: hide_my_name → hide_name
     # ─────────────────────────────────────────
 
-    async def send_gift(self, user_id: int, gift_id: str, text: str = None, hide_my_name: bool = False):
+    async def send_gift(self, user_id: int, gift_id: str, text: str = None, anonymous: bool = False):
         try:
-            logger.info(f"🎁 sendGift → user={user_id}, gift={gift_id}, anon={hide_my_name}")
-            payload = {"user_id": user_id, "gift_id": gift_id}
+            logger.info(f"🎁 sendGift → user={user_id}, gift={gift_id}, anonymous={anonymous}")
+
+            payload = {
+                "user_id": user_id,
+                "gift_id": gift_id,
+            }
+
             if text:
                 payload["text"] = text
-            if hide_my_name:
-                payload["hide_my_name"] = True
+
+            # ПРАВИЛЬНЫЙ ПАРАМЕТР ДЛЯ АНОНИМНОСТИ
+            if anonymous:
+                payload["hide_name"] = True
+
+            logger.info(f"📤 sendGift payload: {json.dumps(payload, ensure_ascii=False)}")
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(f"{self.base_url}/sendGift", json=payload) as response:
                     result = await response.json()
-                    logger.info(f"sendGift ответ: {json.dumps(result, ensure_ascii=False)}")
+                    logger.info(f"📥 sendGift ответ: {json.dumps(result, ensure_ascii=False)}")
+
                     if result.get("ok"):
+                        logger.info(f"✅ Подарок отправлен (anonymous={anonymous})")
                         return True
-                    logger.error(f"❌ sendGift: {result.get('description')}")
+
+                    logger.error(f"❌ sendGift ошибка: {result.get('description')}")
                     return False
+
         except Exception as e:
             logger.error(f"❌ sendGift исключение: {e}")
             return False
 
     # ─────────────────────────────────────────
-    # ИНВОЙС — ИСПРАВЛЕНЫ ВСЕ ОШИБКИ
+    # ИНВОЙС
     # ─────────────────────────────────────────
 
     async def send_invoice(self, chat_id: int):
@@ -309,11 +321,8 @@ class GiftSender:
 
             gift = self.gifts[gift_key]
             is_anonymous = state.get("anonymous", False)
-
-            # FIX: единый метод расчёта суммы
             total_price = self.calc_total(chat_id)
 
-            # FIX: payload без спецсимволов (только alnum + _)
             recipient_raw = state.get("recipient_username", "self")
             recipient_safe = "".join(c for c in str(recipient_raw) if c.isalnum() or c == "_")
             unique_payload = f"{gift_key}_{chat_id}_{recipient_safe}_{int(time.time())}"
@@ -323,7 +332,6 @@ class GiftSender:
 
             logger.info(f"💳 Инвойс: {total_price}⭐️, anon={is_anonymous}, payload={unique_payload}")
 
-            # FIX: XTR = одна позиция, amount = целые звёзды (не копейки!)
             label = gift["name"]
             if is_anonymous:
                 label += " + Анонимность"
@@ -513,7 +521,6 @@ class GiftSender:
             if offset > 0:
                 params["offset"] = offset
 
-            # FIX #6: явный таймаут aiohttp = polling timeout + буфер
             timeout = aiohttp.ClientTimeout(total=40)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(f"{self.base_url}/getUpdates", params=params) as response:
@@ -526,7 +533,7 @@ class GiftSender:
             return []
 
     # ─────────────────────────────────────────
-    # ОБРАБОТКА ОПЛАТЫ — FIX #1: отдельный метод
+    # ОБРАБОТКА ОПЛАТЫ
     # ─────────────────────────────────────────
 
     async def handle_successful_payment(self, message: dict):
@@ -536,7 +543,6 @@ class GiftSender:
 
         logger.info(f"💰 ОПЛАТА: payment_id={payment_id}, chat={chat_id}")
 
-        # Защита от двойной обработки
         if payment_id in self.processed_payments:
             logger.warning(f"⚠️ Дублированный платёж проигнорирован: {payment_id}")
             return
@@ -567,7 +573,7 @@ class GiftSender:
         if recipient == "self":
             await self.send_message(chat_id, f"⏳ Отправляю {gift['emoji']}...")
             await asyncio.sleep(1)
-            success = await self.send_gift(chat_id, gift["gift_id"], message_text, hide_my_name=False)
+            success = await self.send_gift(chat_id, gift["gift_id"], message_text, anonymous=False)
             if success:
                 await self.send_message(
                     chat_id,
@@ -583,7 +589,7 @@ class GiftSender:
 
             if recipient_id:
                 success = await self.send_gift(
-                    recipient_id, gift["gift_id"], message_text, hide_my_name=is_anonymous
+                    recipient_id, gift["gift_id"], message_text, anonymous=is_anonymous
                 )
                 if success:
                     sender_info = self.all_users.get(chat_id, {})
@@ -608,7 +614,6 @@ class GiftSender:
                 else:
                     await self.send_message(chat_id, "❌ Ошибка при доставке. Обратись к администратору.")
             else:
-                # Получатель ещё не писал боту — ставим в очередь
                 payload_key = state.get("payload", f"pending_{chat_id}_{int(time.time())}")
                 self.pending_gifts[payload_key] = {
                     "gift_key": gift_key,
@@ -623,7 +628,6 @@ class GiftSender:
                     parse_mode="HTML"
                 )
 
-        # Очистка состояния
         for storage in [self.user_states, self.order_messages, self.temp_messages]:
             if chat_id in storage:
                 del storage[chat_id]
@@ -634,7 +638,6 @@ class GiftSender:
 
     async def process_update(self, update: dict):
         try:
-            # Pre-checkout — отвечаем первым делом (ограничение по времени!)
             if "pre_checkout_query" in update:
                 pcq = update["pre_checkout_query"]
                 logger.info(f"💳 Pre-checkout: id={pcq['id']}, amount={pcq.get('total_amount')}⭐️")
@@ -646,12 +649,10 @@ class GiftSender:
                     )
                 return
 
-            # FIX #1: successful_payment — отдельная ветка, до обработки текста
             if "message" in update and "successful_payment" in update["message"]:
                 await self.handle_successful_payment(update["message"])
                 return
 
-            # Обычные сообщения
             if "message" in update:
                 message = update["message"]
                 chat_id = message["chat"]["id"]
@@ -671,9 +672,7 @@ class GiftSender:
                         await self.send_message(chat_id, "⚠️ У тебя активный заказ! /cancel для отмены")
                         return
 
-                    # Доставляем ожидающие подарки
                     if username:
-                        # FIX #4: сначала собираем ключи, потом удаляем
                         pending_keys = [
                             k for k, v in self.pending_gifts.items()
                             if v.get("recipient_username", "").lower() == username.lower()
@@ -690,7 +689,7 @@ class GiftSender:
                             sender_id = gift_data["sender_id"]
                             msg = gift_data.get("message")
 
-                            success = await self.send_gift(chat_id, gift["gift_id"], msg, hide_my_name=is_anon)
+                            success = await self.send_gift(chat_id, gift["gift_id"], msg, anonymous=is_anon)
                             if success:
                                 sender_info = self.all_users.get(sender_id, {})
                                 sender_name = sender_info.get("first_name", "Кто-то")
@@ -820,7 +819,6 @@ class GiftSender:
                         )
                         await self.send_message(chat_id, preview, parse_mode="HTML", reply_markup=keyboard)
 
-            # Callback-запросы
             if "callback_query" in update:
                 cb = update["callback_query"]
                 cq_id = cb["id"]
@@ -936,7 +934,6 @@ class GiftSender:
                     if chat_id in self.user_states and self.user_states[chat_id].get("invoice_sent_at"):
                         await self.answer_callback_query(cq_id, "⚠️ Активный заказ! /cancel для отмены", show_alert=True)
                         return
-                    # Очищаем старое сообщение заказа
                     if chat_id in self.order_messages:
                         await self.delete_message(chat_id, self.order_messages[chat_id])
                         del self.order_messages[chat_id]
@@ -1026,7 +1023,6 @@ class GiftSender:
         logger.info("🚀 Запуск бота...")
         bot_username = await self.get_bot_username()
 
-        # FIX #3: пропускаем старые апдейты при старте
         stale = await self.get_updates(offset=0)
         offset = (stale[-1]["update_id"] + 1) if stale else 0
         if stale:
