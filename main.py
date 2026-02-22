@@ -23,7 +23,7 @@ API_ID = 24174609           # Твой api_id с my.telegram.org
 API_HASH = “ff615e3534b9b0649bf9c82c7226c249”  # Твой api_hash с my.telegram.org
 PHONE = “+380931147007”      # Номер телефона юзер-аккаунта
 # Стоимость анонимности в звёздах (редактируй тут)
-ANONYMITY_PRICE = 5
+ANONYMITY_PRICE = 1
 # Список подарков
 GIFTS = {
  "gift_1": {
@@ -35,19 +35,19 @@ GIFTS = {
  "gift_2": {
  "name": " Новогодний мишка",
  "emoji": " ",
- "price": 65,
+ "price": 49,
  "gift_id": "5956217000635139069"
  },
  "gift_3": {
  "name": " Февральское сердце",
  "emoji": " ",
- "price": 65,
+ "price": 60,
  "gift_id": "5801108895304779062"
  },
  "gift_4": {
  "name": " Февральский мишка",
  "emoji": " ",
- "price": 65,
+ "price": 60,
  "gift_id": "5800655655995968830"
  }
 }
