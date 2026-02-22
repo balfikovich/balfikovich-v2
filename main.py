@@ -22,9 +22,9 @@ BOT_TOKEN = "8442227835:AAEm4UYtkDX8TrTpilX5iDJhxnMegkVdmzM"
 ADMIN_ID = 5479063264
 
 # Настройки Telethon (юзер-аккаунт для анонимных подарков)
-API_ID = 24174609           # Твой api_id с my.telegram.org
-API_HASH = "ff615e3534b9b0649bf9c82c7226c249"  # Твой api_hash с my.telegram.org
-PHONE = "+380931147007"      # Номер телефона юзер-аккаунта
+API_ID = 37701409           # Твой api_id с my.telegram.org
+API_HASH = "5cbdd4ad9f6d19b80e6d53685a914ec7"  # Твой api_hash с my.telegram.org
+PHONE = "+380934545223"      # Номер телефона юзер-аккаунта
 
 # Стоимость анонимности в звёздах (редактируй тут)
 ANONYMITY_PRICE = 1
