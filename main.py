@@ -31,14 +31,14 @@ PHONE = "+380934545223"      # Номер телефона юзер-аккаун
 ANONYMITY_PRICE = 1
 
 # Порог баланса для уведомления админа (редактируй тут)
-LOW_BALANCE_THRESHOLD = 50
+LOW_BALANCE_THRESHOLD = 100
 
 # Список подарков
 GIFTS = {
     "gift_1": {
         "name": "🎄 Елка новогодняя",
         "emoji": "🎄",
-        "price": 60,
+        "price": 600,
         "gift_id": "5922558454332916696"
     },
     "gift_2": {
@@ -50,13 +50,13 @@ GIFTS = {
     "gift_3": {
         "name": "💝 Февральское сердце",
         "emoji": "💝",
-        "price": 60,
+        "price": 605,
         "gift_id": "5801108895304779062"
     },
     "gift_4": {
         "name": "🧸 Февральский мишка",
         "emoji": "🧸",
-        "price": 60,
+        "price": 605,
         "gift_id": "5800655655995968830"
     }
 }
@@ -128,29 +128,40 @@ async def send_gift_anonymous(recipient_user_id: int, gift_id: int, message_text
             if balance <= LOW_BALANCE_THRESHOLD and bot_base_url and admin_id:
                 await notify_admin_low_balance(bot_base_url, admin_id, balance)
             if balance <= 0:
-                logger.warning(f"Not enough stars! Balance: {balance}")
+                logger.warning("Not enough stars! Balance: " + str(balance))
                 return "no_balance"
 
-        from telethon.tl.functions.payments import SendStarGiftRequest
+        from telethon.tl.types import InputInvoiceStarGift, TextWithEntities
+        from telethon.tl.functions.payments import SendStarsFormRequest, GetPaymentFormRequest
+
         recipient = await telethon_client.get_entity(recipient_user_id)
 
-        result = await telethon_client(SendStarGiftRequest(
+        msg = TextWithEntities(text=message_text, entities=[]) if message_text else None
+
+        invoice = InputInvoiceStarGift(
             hide_name=True,
             include_upgrade=False,
             peer=recipient,
             gift_id=int(gift_id),
-            message=tl_types.TextWithEntities(text=message_text, entities=[]) if message_text else None
+            message=msg
+        )
+
+        form = await telethon_client(GetPaymentFormRequest(invoice=invoice))
+
+        result = await telethon_client(SendStarsFormRequest(
+            form_id=form.form_id,
+            invoice=invoice
         ))
 
-        logger.info(f"Anonymous gift sent: {result}")
+        logger.info("Anonymous gift sent OK")
         return True
 
     except Exception as e:
         err = str(e).lower()
         if "stars" in err or "balance" in err or "insufficient" in err:
-            logger.warning(f"Not enough stars: {e}")
+            logger.warning("Not enough stars: " + str(e))
             return "no_balance"
-        logger.error(f"Anonymous gift error: {e}")
+        logger.error("Anonymous gift error: " + str(e))
         import traceback
         logger.error(traceback.format_exc())
         return False
