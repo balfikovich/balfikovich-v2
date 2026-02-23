@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # На Railway: Settings → Variables → добавить каждую переменную
 # Локально: просто замени os.environ.get("...", "ЗНАЧЕНИЕ_ПО_УМОЛЧАНИЮ")
 # ═══════════════════════════════════════════════════════════
-BOT_TOKEN             = os.environ.get("BOT_TOKEN", "8442227835:AAEm4UYtkDX8TrTpilX5iDJhxnMegkVdmzM")
+BOT_TOKEN             = os.environ.get("BOT_TOKEN", "8118873655:AAEM3HJIyLxjFnuuD2dIrNBqO3v0j6Sv1bg")
 ADMIN_ID              = int(os.environ.get("ADMIN_ID", "5479063264"))
 API_ID                = int(os.environ.get("API_ID", "37701409"))
 API_HASH              = os.environ.get("API_HASH", "5cbdd4ad9f6d19b80e6d53685a914ec7")
