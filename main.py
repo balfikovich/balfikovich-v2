@@ -16,7 +16,7 @@ ADMIN_ID = 5479063264
 
 API_ID = 37701409
 API_HASH = "5cbdd4ad9f6d19b80e6d53685a914ec7"
-PHONE = "+380934545223"
+PHONE = "+38093454523"
 SENDER_BOT_USERNAME = "balfikovich_gifts"  # username MTProto аккаунта (без @)
 
 MIN_DELAY = 3
